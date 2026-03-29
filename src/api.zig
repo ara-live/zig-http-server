@@ -57,7 +57,10 @@ const SessionManager = struct {
         }
 
         // Start WGC capture session
-        capture.startCapture(hwnd) catch return false;
+        capture.startCapture(hwnd) catch {
+            // Even if start fails, mark as "new" so we get retries
+            return true;
+        };
 
         // Track it
         if (self.count < MAX_SESSIONS) {
@@ -350,29 +353,35 @@ const Connection = struct {
             if (hwnd == 0) return sendError(request, .internal_server_error, "no foreground window");
         }
 
-        // Ensure WGC session (with warmup for new sessions)
+        // Ensure WGC session
         const is_new = self.api.sessions.ensureSession(hwnd);
-        if (is_new) {
-            std.Thread.sleep(100_000_000); // 100ms warmup
-        }
 
         // Save frame to temp file
         const ext = if (format == .png) "png" else "jpg";
         var path_buf: [128]u8 = undefined;
         const path = self.api.sessions.tmpPath(hwnd, ext, &path_buf);
 
-        capture.saveFrame(hwnd, path, format) catch |err| {
-            // Retry once for new sessions
-            if (is_new) {
-                std.Thread.sleep(150_000_000); // 150ms more
-                capture.saveFrame(hwnd, path, format) catch {
-                    return sendError(request, .internal_server_error, "capture failed");
-                };
-            } else {
-                log.err("saveFrame: {}", .{err});
-                return sendError(request, .internal_server_error, "capture failed");
-            }
+        // Try immediately — optimistic path
+        const captured = blk: {
+            capture.saveFrame(hwnd, path, format) catch {
+                // Failed — spin-retry for new sessions (WGC warmup)
+                if (is_new) {
+                    var attempts: u32 = 0;
+                    while (attempts < 20) : (attempts += 1) { // 20 * 10ms = 200ms max
+                        std.Thread.sleep(10_000_000); // 10ms
+                        capture.saveFrame(hwnd, path, format) catch continue;
+                        break :blk true;
+                    }
+                    break :blk false;
+                } else {
+                    break :blk false;
+                }
+            };
+            break :blk true;
         };
+        if (!captured) {
+            return sendError(request, .internal_server_error, "capture failed");
+        }
 
         // Read file and send
         const file = std.fs.cwd().openFile(path, .{}) catch {

@@ -11,6 +11,7 @@ const builtin = @import("builtin");
 const log = std.log.scoped(.api);
 const Config = @import("config.zig").Config;
 const capture = @import("capture.zig");
+const nuclear = @import("nuclear_capture.zig");
 
 const kernel32 = if (builtin.os.tag == .windows) std.os.windows.kernel32 else struct {};
 const HANDLE_FLAG_INHERIT: u32 = 0x00000001;
@@ -136,13 +137,26 @@ pub const Api = struct {
     start_time: i64,
     warm: Warm,
     sessions: SessionManager,
+    use_nuclear: bool,
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config) !Api {
-        // Load ScreenMaster DLL
-        capture.loadDll(config.dll_path) catch |err| {
-            log.err("failed to load ScreenMaster.dll: {}", .{err});
-            return err;
+        // Try nuclear GPU pipeline first (sub-ms capture)
+        var use_nuclear = false;
+        nuclear.init(allocator, 1568, 882) catch |err| {
+            log.warn("nuclear GPU pipeline unavailable: {}, falling back to DLL", .{err});
         };
+        if (nuclear.isInitialized()) {
+            use_nuclear = true;
+            log.info("🔥 Nuclear GPU pipeline active (sub-ms capture)", .{});
+        }
+
+        // Fall back to ScreenMaster DLL if nuclear not available
+        if (!use_nuclear) {
+            capture.loadDll(config.dll_path) catch |err| {
+                log.err("failed to load ScreenMaster.dll: {}", .{err});
+                return err;
+            };
+        }
 
         const address = try net.Address.resolveIp(config.host, config.port);
         var listener = try address.listen(.{ .reuse_address = true });
@@ -161,6 +175,7 @@ pub const Api = struct {
             .start_time = std.time.timestamp(),
             .warm = .{},
             .sessions = try SessionManager.init(allocator),
+            .use_nuclear = use_nuclear,
         };
     }
 
@@ -170,7 +185,11 @@ pub const Api = struct {
         self.warm.block = null;
         self.warm.mutex.unlock();
         self.listener.deinit();
-        capture.unloadDll();
+        if (self.use_nuclear) {
+            nuclear.deinit();
+        } else {
+            capture.unloadDll();
+        }
     }
 
     pub fn run(self: *Api) void {
@@ -374,7 +393,27 @@ const Connection = struct {
             if (hwnd == 0) return sendError(request, .internal_server_error, "no foreground window");
         }
 
-        // Ensure WGC session
+        // 🔥 NUCLEAR PATH: Direct GPU capture → JPEG (sub-ms)
+        if (self.api.use_nuclear) {
+            const jpeg_data = nuclear.capture(self.api.allocator, hwnd) catch |err| {
+                log.warn("nuclear capture failed: {}, trying again", .{err});
+                // Single retry for new sessions
+                std.Thread.sleep(50 * std.time.ns_per_ms);
+                const retry_data = nuclear.capture(self.api.allocator, hwnd) catch {
+                    return sendError(request, .internal_server_error, "nuclear capture failed");
+                };
+                defer self.api.allocator.free(retry_data);
+                @memcpy(self.response_buf[0..retry_data.len], retry_data);
+                sendBinary(request, self.response_buf[0..retry_data.len], "image/jpeg", .ok);
+                return .ok;
+            };
+            defer self.api.allocator.free(jpeg_data);
+            @memcpy(self.response_buf[0..jpeg_data.len], jpeg_data);
+            sendBinary(request, self.response_buf[0..jpeg_data.len], "image/jpeg", .ok);
+            return .ok;
+        }
+
+        // LEGACY PATH: DLL capture via temp file
         const is_new = self.api.sessions.ensureSession(hwnd);
 
         // Save frame to temp file

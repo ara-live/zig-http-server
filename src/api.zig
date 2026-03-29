@@ -151,7 +151,9 @@ pub const Api = struct {
         }
 
         // Fall back to ScreenMaster DLL if nuclear not available
+        log.info("init: use_nuclear={}, isInitialized={}", .{ use_nuclear, nuclear.isInitialized() });
         if (!use_nuclear) {
+            log.info("Loading ScreenMaster DLL fallback", .{});
             capture.loadDll(config.dll_path) catch |err| {
                 log.err("failed to load ScreenMaster.dll: {}", .{err});
                 return err;
@@ -394,12 +396,15 @@ const Connection = struct {
         }
 
         // 🔥 NUCLEAR PATH: Direct GPU capture → JPEG (sub-ms)
+        log.info("CAPTURE REQUEST: use_nuclear={}", .{self.api.use_nuclear});
         if (self.api.use_nuclear) {
+            log.info("Trying nuclear capture for hwnd {}", .{hwnd});
             const jpeg_data = nuclear.capture(self.api.allocator, hwnd) catch |err| {
                 log.warn("nuclear capture failed: {}, trying again", .{err});
                 // Single retry for new sessions
                 std.Thread.sleep(50 * std.time.ns_per_ms);
-                const retry_data = nuclear.capture(self.api.allocator, hwnd) catch {
+                const retry_data = nuclear.capture(self.api.allocator, hwnd) catch |err2| {
+                    log.err("nuclear capture retry failed: {}", .{err2});
                     return sendError(request, .internal_server_error, "nuclear capture failed");
                 };
                 defer self.api.allocator.free(retry_data);
@@ -414,6 +419,7 @@ const Connection = struct {
         }
 
         // LEGACY PATH: DLL capture via temp file
+        log.info("Using DLL capture path for hwnd {}", .{hwnd});
         const is_new = self.api.sessions.ensureSession(hwnd);
 
         // Save frame to temp file

@@ -146,20 +146,21 @@ pub const IGraphicsCaptureItem = extern struct {
 //  Public API
 // ═══════════════════════════════════════════════════════════════
 
-var g_initialized: bool = false;
+// Thread-local WinRT initialization (RoInitialize must be called per-thread)
+threadlocal var tls_initialized: bool = false;
 
 pub fn init() !void {
-    if (g_initialized) return;
+    if (tls_initialized) return;
 
     const hr = RoInitialize(1); // RO_INIT_MULTITHREADED
-    // S_OK or S_FALSE (already initialized) are both fine
+    // S_OK (0) or S_FALSE (1, already initialized on this thread) are both fine
     if (hr < 0) {
         std.log.err("RoInitialize failed: 0x{X:0>8}", .{@as(u32, @bitCast(hr))});
         return error.RoInitializeFailed;
     }
 
-    g_initialized = true;
-    std.log.info("WinRT initialized", .{});
+    tls_initialized = true;
+    std.log.info("WinRT initialized on thread", .{});
 }
 
 /// Creates a GraphicsCaptureItem for a window handle

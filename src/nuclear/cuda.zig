@@ -243,17 +243,12 @@ pub const CudaContext = struct {
             _ = adp_unk.*.Release(adapter.?);
         }
 
-        // Try cuD3D11GetDevice first
+        // Get CUDA device for this adapter
         var device: CUdevice = undefined;
         result = api.cuD3D11GetDevice(&device, adapter.?);
         if (result != CUDA_SUCCESS) {
-            // Blackwell/sm_120 may have D3D11 interop issues - fall back to device 0
-            std.log.warn("cuD3D11GetDevice failed: {}, trying device 0 directly", .{result});
-            result = api.cuDeviceGet(&device, 0);
-            if (result != CUDA_SUCCESS) {
-                std.log.err("cuDeviceGet(0) also failed: {}", .{result});
-                return error.CudaDeviceNotFound;
-            }
+            std.log.err("cuD3D11GetDevice failed: {}", .{result});
+            return error.CudaDeviceNotFound;
         }
         std.log.info("CUDA device for D3D11 adapter: {}", .{device});
 

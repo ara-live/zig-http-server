@@ -392,74 +392,7 @@ extern "d3d11" fn D3D11CreateDevice(
     ppImmediateContext: *?*anyopaque,
 ) callconv(WINAPI) windows.HRESULT;
 
-extern "dxgi" fn CreateDXGIFactory1(
-    riid: *const GUID,
-    ppFactory: *?*anyopaque,
-) callconv(WINAPI) windows.HRESULT;
-
 const D3D11_SDK_VERSION: u32 = 7;
-
-// DXGI Factory interface
-const IID_IDXGIFactory1 = GUID{
-    .Data1 = 0x770aae78,
-    .Data2 = 0xf26f,
-    .Data3 = 0x4dba,
-    .Data4 = .{ 0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87 },
-};
-
-const IDXGIFactory1Vtbl = extern struct {
-    // IUnknown
-    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(WINAPI) windows.HRESULT,
-    AddRef: *const fn (*anyopaque) callconv(WINAPI) u32,
-    Release: *const fn (*anyopaque) callconv(WINAPI) u32,
-    // IDXGIObject
-    SetPrivateData: *const anyopaque,
-    SetPrivateDataInterface: *const anyopaque,
-    GetPrivateData: *const anyopaque,
-    GetParent: *const anyopaque,
-    // IDXGIFactory
-    EnumAdapters: *const fn (*anyopaque, u32, *?*anyopaque) callconv(WINAPI) windows.HRESULT,
-    MakeWindowAssociation: *const anyopaque,
-    GetWindowAssociation: *const anyopaque,
-    CreateSwapChain: *const anyopaque,
-    CreateSoftwareAdapter: *const anyopaque,
-    // IDXGIFactory1
-    EnumAdapters1: *const fn (*anyopaque, u32, *?*anyopaque) callconv(WINAPI) windows.HRESULT,
-    IsCurrent: *const anyopaque,
-};
-
-const DXGI_ADAPTER_DESC1 = extern struct {
-    Description: [128]u16,
-    VendorId: u32,
-    DeviceId: u32,
-    SubSysId: u32,
-    Revision: u32,
-    DedicatedVideoMemory: usize,
-    DedicatedSystemMemory: usize,
-    SharedSystemMemory: usize,
-    AdapterLuid: extern struct { LowPart: u32, HighPart: i32 },
-    Flags: u32,
-};
-
-const IDXGIAdapter1Vtbl = extern struct {
-    // IUnknown
-    QueryInterface: *const fn (*anyopaque, *const GUID, *?*anyopaque) callconv(WINAPI) windows.HRESULT,
-    AddRef: *const fn (*anyopaque) callconv(WINAPI) u32,
-    Release: *const fn (*anyopaque) callconv(WINAPI) u32,
-    // IDXGIObject
-    SetPrivateData: *const anyopaque,
-    SetPrivateDataInterface: *const anyopaque,
-    GetPrivateData: *const anyopaque,
-    GetParent: *const anyopaque,
-    // IDXGIAdapter
-    EnumOutputs: *const anyopaque,
-    GetDesc: *const anyopaque,
-    CheckInterfaceSupport: *const anyopaque,
-    // IDXGIAdapter1
-    GetDesc1: *const fn (*anyopaque, *DXGI_ADAPTER_DESC1) callconv(WINAPI) windows.HRESULT,
-};
-
-const NVIDIA_VENDOR_ID: u32 = 0x10DE;
 
 // ═══════════════════════════════════════════════════════════════
 //  Public API
@@ -482,65 +415,13 @@ pub const Device = struct {
             .BGRA_SUPPORT = true, // Required for WGC
         };
 
-        // Find NVIDIA adapter for CUDA interop
-        var nvidia_adapter: ?*anyopaque = null;
-        {
-            var factory: ?*anyopaque = null;
-            var hr = CreateDXGIFactory1(&IID_IDXGIFactory1, &factory);
-            if (hr >= 0 and factory != null) {
-                defer {
-                    const fac_unk: *const *const IUnknownVtbl = @ptrCast(@alignCast(factory.?));
-                    _ = fac_unk.*.Release(factory.?);
-                }
-                
-                const fac_vtbl: *const *const IDXGIFactory1Vtbl = @ptrCast(@alignCast(factory.?));
-                var adapter_idx: u32 = 0;
-                while (true) : (adapter_idx += 1) {
-                    var adapter: ?*anyopaque = null;
-                    hr = fac_vtbl.*.EnumAdapters1(factory.?, adapter_idx, &adapter);
-                    if (hr < 0) break; // No more adapters
-                    
-                    const adp_vtbl: *const *const IDXGIAdapter1Vtbl = @ptrCast(@alignCast(adapter.?));
-                    var desc: DXGI_ADAPTER_DESC1 = undefined;
-                    _ = adp_vtbl.*.GetDesc1(adapter.?, &desc);
-                    
-                    // Log adapter info
-                    var name_buf: [128]u8 = undefined;
-                    const name_len = std.unicode.utf16LeToUtf8(&name_buf, &desc.Description) catch 0;
-                    std.log.info("Adapter {}: {s} (VendorId: 0x{X:0>4}, VRAM: {}MB)", .{
-                        adapter_idx,
-                        name_buf[0..name_len],
-                        desc.VendorId,
-                        desc.DedicatedVideoMemory / (1024 * 1024),
-                    });
-                    
-                    if (desc.VendorId == NVIDIA_VENDOR_ID) {
-                        nvidia_adapter = adapter;
-                        std.log.info("Selected NVIDIA adapter for CUDA interop", .{});
-                        break;
-                    } else {
-                        // Release non-NVIDIA adapter
-                        const adp_unk: *const *const IUnknownVtbl = @ptrCast(@alignCast(adapter.?));
-                        _ = adp_unk.*.Release(adapter.?);
-                    }
-                }
-            }
-        }
-        defer if (nvidia_adapter) |adp| {
-            const adp_unk: *const *const IUnknownVtbl = @ptrCast(@alignCast(adp));
-            _ = adp_unk.*.Release(adp);
-        };
-
         var device: ?*ID3D11Device = null;
         var context: ?*anyopaque = null;
         var feature_level: D3D_FEATURE_LEVEL = undefined;
 
-        // Use NVIDIA adapter if found, otherwise default
-        const driver_type: D3D_DRIVER_TYPE = if (nvidia_adapter != null) .UNKNOWN else .HARDWARE;
-        
         const hr = D3D11CreateDevice(
-            nvidia_adapter, // Use NVIDIA adapter for CUDA interop
-            driver_type,
+            null, // Default adapter
+            .HARDWARE,
             null,
             flags,
             &feature_levels,

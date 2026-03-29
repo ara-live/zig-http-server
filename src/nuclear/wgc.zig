@@ -32,6 +32,12 @@ extern "api-ms-win-core-winrt-l1-1-0" fn RoInitialize(
     initType: u32, // RO_INIT_MULTITHREADED = 1
 ) callconv(WINAPI) windows.HRESULT;
 
+// COM initialization (required before WinRT on some thread types)
+extern "ole32" fn CoInitializeEx(
+    pvReserved: ?*anyopaque,
+    dwCoInit: u32, // COINIT_MULTITHREADED = 0
+) callconv(WINAPI) windows.HRESULT;
+
 extern "api-ms-win-core-winrt-l1-1-0" fn RoGetActivationFactory(
     activatableClassId: HSTRING,
     iid: *const d3d11.GUID,
@@ -146,12 +152,21 @@ pub const IGraphicsCaptureItem = extern struct {
 //  Public API
 // ═══════════════════════════════════════════════════════════════
 
-// Thread-local WinRT initialization (RoInitialize must be called per-thread)
+// Thread-local COM/WinRT initialization (must be called per-thread)
 threadlocal var tls_initialized: bool = false;
 
 pub fn init() !void {
     if (tls_initialized) return;
 
+    // Initialize COM first (MTA mode)
+    const co_hr = CoInitializeEx(null, 0); // COINIT_MULTITHREADED = 0
+    // S_OK, S_FALSE (already init), or RPC_E_CHANGED_MODE (different mode) are all acceptable
+    if (co_hr < 0 and co_hr != @as(i32, @bitCast(@as(u32, 0x80010106)))) { // RPC_E_CHANGED_MODE
+        std.log.err("CoInitializeEx failed: 0x{X:0>8}", .{@as(u32, @bitCast(co_hr))});
+        return error.CoInitializeFailed;
+    }
+
+    // Then initialize WinRT
     const hr = RoInitialize(1); // RO_INIT_MULTITHREADED
     // S_OK (0) or S_FALSE (1, already initialized on this thread) are both fine
     if (hr < 0) {
@@ -160,7 +175,7 @@ pub fn init() !void {
     }
 
     tls_initialized = true;
-    std.log.info("WinRT initialized on thread", .{});
+    std.log.info("COM+WinRT initialized on thread", .{});
 }
 
 /// Creates a GraphicsCaptureItem for a window handle

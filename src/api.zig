@@ -12,6 +12,7 @@ const log = std.log.scoped(.api);
 const Config = @import("config.zig").Config;
 const capture = @import("capture.zig");
 const nuclear = @import("nuclear_capture.zig");
+const capture_queue = @import("capture_queue.zig");
 
 const kernel32 = if (builtin.os.tag == .windows) std.os.windows.kernel32 else struct {};
 const HANDLE_FLAG_INHERIT: u32 = 0x00000001;
@@ -140,14 +141,21 @@ pub const Api = struct {
     use_nuclear: bool,
 
     pub fn init(allocator: std.mem.Allocator, config: *const Config) !Api {
-        // Try nuclear GPU pipeline first (sub-ms capture)
+        // Try nuclear GPU pipeline (init happens on capture queue thread)
         var use_nuclear = false;
-        nuclear.init(allocator, 1568, 882) catch |err| {
-            log.warn("nuclear GPU pipeline unavailable: {}, falling back to DLL", .{err});
+        capture_queue.initQueue(allocator) catch |err| {
+            log.warn("capture queue init failed: {}, falling back to DLL", .{err});
         };
-        if (nuclear.isInitialized()) {
-            use_nuclear = true;
-            log.info("🔥 Nuclear GPU pipeline active (sub-ms capture)", .{});
+        if (capture_queue.g_queue != null) {
+            // Wait briefly for capture thread to init nuclear
+            std.Thread.sleep(500 * std.time.ns_per_ms);
+            if (nuclear.isInitialized()) {
+                use_nuclear = true;
+                log.info("🔥 Nuclear GPU pipeline active (sub-ms capture)", .{});
+            } else {
+                log.warn("nuclear pipeline not ready, falling back to DLL", .{});
+                capture_queue.deinitQueue();
+            }
         }
 
         // Fall back to ScreenMaster DLL if nuclear not available
@@ -188,6 +196,7 @@ pub const Api = struct {
         self.warm.mutex.unlock();
         self.listener.deinit();
         if (self.use_nuclear) {
+            capture_queue.deinitQueue();
             nuclear.deinit();
         } else {
             capture.unloadDll();
@@ -399,11 +408,12 @@ const Connection = struct {
         log.info("CAPTURE REQUEST: use_nuclear={}", .{self.api.use_nuclear});
         if (self.api.use_nuclear) {
             log.info("Trying nuclear capture for hwnd {}", .{hwnd});
-            const jpeg_data = nuclear.capture(self.api.allocator, hwnd) catch |err| {
+            // Use queued capture (routes through dedicated COM thread)
+            const jpeg_data = capture_queue.queuedCapture(self.api.allocator, hwnd) catch |err| {
                 log.warn("nuclear capture failed: {}, trying again", .{err});
                 // Single retry for new sessions
                 std.Thread.sleep(50 * std.time.ns_per_ms);
-                const retry_data = nuclear.capture(self.api.allocator, hwnd) catch |err2| {
+                const retry_data = capture_queue.queuedCapture(self.api.allocator, hwnd) catch |err2| {
                     log.err("nuclear capture retry failed: {}", .{err2});
                     return sendError(request, .internal_server_error, "nuclear capture failed");
                 };

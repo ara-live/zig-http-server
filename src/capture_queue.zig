@@ -147,43 +147,51 @@ pub const CaptureQueue = struct {
         std.log.info("Nuclear pipeline initialized on capture thread", .{});
         
         while (!self.shutdown.load(.acquire)) {
-            // Wait for work
+            // Check for work (short timeout so we can keep frames fresh)
+            var has_work = false;
             if (self.work_event) |ev| {
-                _ = WaitForSingleObject(ev, 100); // 100ms timeout for shutdown check
+                const wait_result = WaitForSingleObject(ev, 16); // ~60fps polling
+                has_work = (wait_result == WAIT_OBJECT_0);
             }
 
-            // Process all pending requests
-            while (true) {
-                const request = blk: {
-                    self.mutex.lock();
-                    defer self.mutex.unlock();
+            // Process pending requests
+            if (has_work) {
+                while (true) {
+                    const request = blk: {
+                        self.mutex.lock();
+                        defer self.mutex.unlock();
 
-                    if (self.count == 0) break :blk null;
+                        if (self.count == 0) break :blk null;
 
-                    const req = self.queue[self.head];
-                    self.head = (self.head + 1) % MAX_QUEUE;
-                    self.count -= 1;
-                    break :blk req;
-                };
+                        const req = self.queue[self.head];
+                        self.head = (self.head + 1) % MAX_QUEUE;
+                        self.count -= 1;
+                        break :blk req;
+                    };
 
-                if (request == null) break;
-                const req = request.?;
+                    if (request == null) break;
+                    const req = request.?;
 
-                std.log.info("Queue thread processing hwnd {}", .{req.hwnd});
-                
-                // Do the actual capture (on this COM-initialized thread)
-                const result = nuclear.capture(req.allocator, req.hwnd);
-                if (result) |data| {
-                    std.log.info("Queue thread capture SUCCESS: {} bytes", .{data.len});
-                    req.result = data;
-                } else |err| {
-                    std.log.err("Queue thread capture FAILED: {}", .{err});
-                    req.err = err;
+                    std.log.info("Queue thread processing hwnd {}", .{req.hwnd});
+                    
+                    // Do the actual capture (on this COM-initialized thread)
+                    const result = nuclear.capture(req.allocator, req.hwnd);
+                    if (result) |data| {
+                        std.log.info("Queue thread capture SUCCESS: {} bytes", .{data.len});
+                        req.result = data;
+                    } else |err| {
+                        std.log.err("Queue thread capture FAILED: {}", .{err});
+                        req.err = err;
+                    }
+
+                    // Signal completion
+                    _ = SetEvent(req.done_event);
                 }
-
-                // Signal completion
-                _ = SetEvent(req.done_event);
             }
+            
+            // Note: DLL has a background thread that continuously processes frames
+            // into a buffer. We don't need that because we process on-demand.
+            // Just let WGC buffer frames until the next request.
         }
 
         std.log.info("Capture queue thread exiting", .{});

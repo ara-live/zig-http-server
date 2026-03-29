@@ -32,8 +32,13 @@ const WindowSession = struct {
     src_height: u32,
     last_used: i64,
     active: bool,
+    // Cached JPEG from last successful capture (like DLL's m_pixelBuffer)
+    cached_jpeg: ?[]u8 = null,
 
     fn deinit(self: *WindowSession, pipeline: *Pipeline) void {
+        if (self.cached_jpeg) |cached| {
+            pipeline.allocator.free(cached);
+        }
         _ = self.session.release();
         _ = self.pool.release();
         _ = self.item.release();
@@ -201,8 +206,9 @@ pub const Pipeline = struct {
         const cuda_resource = try self.cuda_ctx.registerD3D11Texture(shared_texture);
         errdefer self.cuda_ctx.unregisterResource(cuda_resource);
         
-        // Start capture
+        // Start capture and wait for first frame (like ScreenMaster test)
         try session.startCapture();
+        std.Thread.sleep(100 * std.time.ns_per_ms); // Give WGC time to deliver first frame
         
         slot.* = .{
             .hwnd = hwnd,
@@ -227,26 +233,31 @@ pub const Pipeline = struct {
     pub fn capture(self: *Pipeline, hwnd: usize) ![]u8 {
         const session = try self.getSession(hwnd);
         
-        // Drain all available frames and use the last one
-        // This mirrors the DLL's "GetLatestFrame" behavior
-        var last_frame: ?*wgc.IDirect3D11CaptureFrame = null;
-        
-        // Give WGC a moment to deliver frames if pool is empty
+        // Try to get a new frame (quick check - don't wait long if cached available)
+        const max_attempts: u32 = if (session.cached_jpeg != null) 3 else 10;
         var attempts: u32 = 0;
-        while (attempts < 20) : (attempts += 1) {
-            // Drain all available frames, keeping only the last
-            while (session.pool.tryGetNextFrame()) |frame| {
-                if (last_frame) |prev| _ = prev.release();
-                last_frame = frame;
+        while (attempts < max_attempts) : (attempts += 1) {
+            if (session.pool.tryGetNextFrame()) |frame| {
+                defer _ = frame.release();
+                const jpeg_data = try self.processFrame(session, frame);
+                
+                // Cache the result (like DLL's m_pixelBuffer)
+                if (session.cached_jpeg) |old| {
+                    self.allocator.free(old);
+                }
+                session.cached_jpeg = jpeg_data;
+                
+                // Return a copy (caller will free it)
+                const copy = try self.allocator.dupe(u8, jpeg_data);
+                return copy;
             }
-            
-            if (last_frame != null) break;
-            std.Thread.sleep(5 * std.time.ns_per_ms);
+            std.Thread.sleep(16 * std.time.ns_per_ms); // ~60fps timing
         }
         
-        if (last_frame) |frame| {
-            defer _ = frame.release();
-            return self.processFrame(session, frame);
+        // No new frame - return cached if available (like DLL's GetLatestFrame)
+        if (session.cached_jpeg) |cached| {
+            log.info("Returning cached JPEG ({} bytes)", .{cached.len});
+            return try self.allocator.dupe(u8, cached);
         }
         
         return error.NoFrameAvailable;
@@ -266,10 +277,16 @@ pub const Pipeline = struct {
         try self.cuda_ctx.mapResource(&session.cuda_resource);
         defer self.cuda_ctx.unmapResource(&session.cuda_resource);
         
+        // Sync CUDA after mapping to ensure D3D11 copy is complete
+        self.cuda_ctx.synchronize();
+        
         const cuda_array = try self.cuda_ctx.getMappedArray(session.cuda_resource);
         
         // Create texture object with hardware bilinear filtering
-        const tex_obj = try self.resize_kernel.createTextureFromArray(cuda_array);
+        const tex_obj = self.resize_kernel.createTextureFromArray(cuda_array) catch |err| {
+            log.err("createTextureFromArray failed: {} (array={})", .{err, @intFromPtr(cuda_array)});
+            return err;
+        };
         defer self.resize_kernel.destroyTexture(tex_obj);
         
         // Launch fused resize+BGRA→RGB kernel
@@ -335,4 +352,21 @@ pub fn warmSession(hwnd: usize) !void {
 
 pub fn isInitialized() bool {
     return global_pipeline != null;
+}
+
+/// Drain frames from all active sessions to keep WGC fresh
+/// Called continuously by capture queue thread (like DLL's ProcessingThreadLoop)
+pub fn drainAllFrames() void {
+    const pipeline = global_pipeline orelse return;
+    pipeline.mutex.lock();
+    defer pipeline.mutex.unlock();
+    
+    for (pipeline.sessions[0..pipeline.session_count]) |*session| {
+        if (session.active) {
+            // Drain any available frames to keep WGC producing new ones
+            while (session.pool.tryGetNextFrame()) |frame| {
+                _ = frame.release();
+            }
+        }
+    }
 }

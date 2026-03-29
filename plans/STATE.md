@@ -1,37 +1,38 @@
 # STATE.md - Nuclear Eyes v2
 
-## Current Issue: NoFrameAvailable on second capture
+## Status: WGC Fixed, CUDA Texture Blocked
 
-### Root Cause Analysis 🧠
-The DLL uses a **background processing thread** that:
-1. Continuously calls `TryGetNextFrame()` in a loop
-2. Copies each frame to a persistent buffer
-3. `GetLatestFrame()` just returns the already-processed buffer
+### What's Working ✅
+- Queue thread pattern (dedicated COM/D3D11 thread)
+- WGC CreateForWindow succeeds (even via ara-gate!)
+- Nuclear pipeline init (CUDA context, nvJPEG, PTX kernel)
+- Frame drain to get latest frame
+- DLL fallback (deployed, ~16ms captures)
 
-Our Zig code only calls `tryGetNextFrame()` when capture is requested.
-After the first frame is consumed, the pool is empty until WGC delivers more.
+### Current Blocker ❌
+**cuTexObjectCreate returns error 1** (CUDA_ERROR_INVALID_VALUE)
 
-### The Fix
-Instead of waiting for one frame, **drain all available frames** and use the last one:
-```zig
-// Drain pool, keep last frame
-var last_frame: ?*Frame = null;
-while (pool.tryGetNextFrame()) |frame| {
-    if (last_frame) |prev| prev.release();
-    last_frame = frame;
-}
-if (last_frame) |frame| return processFrame(frame);
-```
+The mapped CUDA array from D3D11 interop isn't compatible with texture objects.
+Possible causes:
+- Array format mismatch (BGRA vs expected format)
+- Array flags incompatible with texture binding
+- Need to use cuGraphicsSubResourceGetMappedArray differently
 
-This mirrors the DLL behavior without needing a persistent background thread.
+### Investigation Needed
+1. Check ScreenMaster's working Zig test - how does it create textures?
+2. Verify CUDA array descriptor format
+3. Try using linear memory instead of texture (if needed)
 
-### Progress
-- ✅ Nuclear pipeline works (verified 89ms, 88KB)
-- ✅ Queue thread pattern working
-- ✅ D3D11/CUDA/nvJPEG all on same thread
-- ❌ Second capture fails (NoFrameAvailable)
+### Session Summary
+This session solved:
+- Thread affinity for WGC (queue pattern)
+- WGC permissions (works via ara-gate now!)
+- Frame availability (drain and use last)
+- Resource mapping (pointer vs copy)
 
-### Launch Context Issue (SOLVED)
-- ara-gate spawn: WGC CreateForWindow fails with 0x80070424
-- Start-Process spawn: Works perfectly
-- Solution: Run eyes via scheduled task or remove from ara-gate management
+The final hurdle is CUDA texture format compatibility.
+
+### Files Changed
+- `capture_queue.zig` - Queue thread pattern
+- `nuclear_capture.zig` - Pipeline init on queue thread, frame drain
+- `wgc.zig` - Per-thread COM/WinRT init

@@ -1,38 +1,28 @@
-/// Zig HTTP Server Template — Entry Point
+/// ara-eyes — Zig HTTP server for WGC screen capture
 ///
-/// Copy this project, add your routes in api.zig, customize config.zig.
+/// Usage: eyes [config.json]
 ///
 const std = @import("std");
-const Config = @import("config").Config;
-const Api = @import("api").Api;
+const config_mod = @import("config.zig");
+const Api = @import("api.zig").Api;
 
-const log = std.log.scoped(.main);
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Load config
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
+
     const config_path = if (args.len > 1) args[1] else "config.json";
+    const config = try config_mod.load(allocator, config_path);
 
-    var config = try Config.loadFromFile(allocator, config_path);
-    defer config.deinit();
-
-    log.info("listening on {s}:{d}", .{ config.host, config.port });
-
-    // Init API server
-    var api = try Api.init(allocator, &config);
+    var api = try Api.init(allocator, config);
     defer api.deinit();
 
-    api.installSignalHandlers();
-
-    log.info("ready", .{});
-
-    // Run (blocks until shutdown signal)
     api.run();
-
-    log.info("shutdown complete", .{});
 }

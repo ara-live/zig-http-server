@@ -1,71 +1,57 @@
+/// ara-eyes configuration
 const std = @import("std");
-const log = std.log.scoped(.config);
 
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
-    port: u16 = 3001,
-    auth_token: ?[]const u8 = null,
-    max_body_size: usize = 65_536, // 64KB
-    socket_timeout_ms: u32 = 30_000, // 30s recv/send timeout per connection
-    max_connections: u32 = 64, // max concurrent connections (thread limit)
-
-    // Add your config fields here:
-    // my_setting: []const u8 = "default",
-
-    // Internal — owns the parsed JSON for string lifetime
-    _parsed: ?std.json.Parsed(std.json.Value) = null,
-    _allocator: ?std.mem.Allocator = null,
-
-    pub fn loadFromFile(allocator: std.mem.Allocator, path: []const u8) !Config {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
-            log.warn("config file not found ({s}), using defaults", .{path});
-            if (err == error.FileNotFound) return Config{};
-            return err;
-        };
-        defer file.close();
-
-        const data = try file.readToEndAlloc(allocator, 1_048_576);
-        defer allocator.free(data);
-
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
-        const obj = parsed.value.object;
-
-        var config = Config{
-            ._parsed = parsed,
-            ._allocator = allocator,
-        };
-
-        if (obj.get("host")) |v| {
-            if (v == .string) config.host = v.string;
-        }
-        if (obj.get("port")) |v| {
-            if (v == .integer) config.port = @intCast(v.integer);
-        }
-        if (obj.get("authToken")) |v| {
-            if (v == .string) config.auth_token = v.string;
-        }
-        if (obj.get("maxBodySize")) |v| {
-            if (v == .integer) config.max_body_size = @intCast(v.integer);
-        }
-        if (obj.get("socketTimeoutMs")) |v| {
-            if (v == .integer) config.socket_timeout_ms = @intCast(v.integer);
-        }
-        if (obj.get("maxConnections")) |v| {
-            if (v == .integer) config.max_connections = @intCast(v.integer);
-        }
-
-        // Parse your custom fields here:
-        // if (obj.get("mySetting")) |v| {
-        //     if (v == .string) config.my_setting = v.string;
-        // }
-
-        return config;
-    }
-
-    pub fn deinit(self: *Config) void {
-        if (self._parsed) |*p| {
-            p.deinit();
-            self._parsed = null;
-        }
-    }
+    port: u16 = 7070,
+    dll_path: []const u8 = "ScreenMaster.dll",
+    max_body_size: usize = 65536,
+    socket_timeout_ms: u32 = 30000,
+    max_connections: u32 = 32,
 };
+
+pub fn load(allocator: std.mem.Allocator, path: []const u8) !*Config {
+    const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        if (err == error.FileNotFound) {
+            std.log.info("config: {s} not found, using defaults", .{path});
+            const cfg = try allocator.create(Config);
+            cfg.* = .{};
+            return cfg;
+        }
+        return err;
+    };
+    defer file.close();
+
+    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(content);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, content, .{});
+    defer parsed.deinit();
+
+    const cfg = try allocator.create(Config);
+    cfg.* = .{};
+
+    if (parsed.value == .object) {
+        const obj = parsed.value.object;
+        if (obj.get("host")) |v| if (v == .string) {
+            cfg.host = try allocator.dupe(u8, v.string);
+        };
+        if (obj.get("port")) |v| if (v == .integer) {
+            cfg.port = @intCast(v.integer);
+        };
+        if (obj.get("dllPath")) |v| if (v == .string) {
+            cfg.dll_path = try allocator.dupe(u8, v.string);
+        };
+        if (obj.get("maxBodySize")) |v| if (v == .integer) {
+            cfg.max_body_size = @intCast(v.integer);
+        };
+        if (obj.get("socketTimeoutMs")) |v| if (v == .integer) {
+            cfg.socket_timeout_ms = @intCast(v.integer);
+        };
+        if (obj.get("maxConnections")) |v| if (v == .integer) {
+            cfg.max_connections = @intCast(v.integer);
+        };
+    }
+
+    return cfg;
+}

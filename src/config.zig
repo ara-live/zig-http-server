@@ -8,6 +8,11 @@ pub const Config = struct {
     max_body_size: usize = 65536,
     socket_timeout_ms: u32 = 30000,
     max_connections: u32 = 32,
+    
+    // Runtime options (don't affect hot path)
+    warmall_enabled: bool = false,      // /warmall endpoint disabled by default
+    max_warm_sessions: u32 = 0,         // 0 = unlimited (when warmall enabled)
+    auto_warmall_on_start: bool = false, // pre-warm all windows on startup
 };
 
 pub fn load(allocator: std.mem.Allocator, path: []const u8) !*Config {
@@ -50,6 +55,15 @@ pub fn load(allocator: std.mem.Allocator, path: []const u8) !*Config {
         };
         if (obj.get("maxConnections")) |v| if (v == .integer) {
             cfg.max_connections = @intCast(v.integer);
+        };
+        if (obj.get("warmallEnabled")) |v| if (v == .bool) {
+            cfg.warmall_enabled = v.bool;
+        };
+        if (obj.get("maxWarmSessions")) |v| if (v == .integer) {
+            cfg.max_warm_sessions = @intCast(v.integer);
+        };
+        if (obj.get("autoWarmallOnStart")) |v| if (v == .bool) {
+            cfg.auto_warmall_on_start = v.bool;
         };
     }
 

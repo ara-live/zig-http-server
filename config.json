@@ -1,0 +1,6 @@
+{
+  "port": 7071,
+  "warmallEnabled": false,
+  "maxWarmSessions": 0,
+  "autoWarmallOnStart": false
+}

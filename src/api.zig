@@ -466,15 +466,29 @@ const Connection = struct {
     }
 
     fn handleWarmAll(self: *Connection, request: *Request) Status {
+        // Check if warmall is enabled in config
+        if (!self.api.config.warmall_enabled) {
+            return sendError(request, .forbidden, "warmall disabled in config");
+        }
+
         var list = capture.listWindows(self.api.allocator) catch {
             return sendError(request, .internal_server_error, "failed to enumerate windows");
         };
         defer list.deinit();
 
+        const max_sessions = self.api.config.max_warm_sessions;
         var warmed: u32 = 0;
         var already: u32 = 0;
         var failed: u32 = 0;
+        var skipped: u32 = 0;
+
         for (list.windows) |win| {
+            // Respect max_warm_sessions limit (0 = unlimited)
+            if (max_sessions > 0 and warmed >= max_sessions) {
+                skipped += 1;
+                continue;
+            }
+
             const result = self.api.sessions.ensureSessionSafe(win.hwnd);
             if (result == .warmed) {
                 warmed += 1;
@@ -488,8 +502,8 @@ const Connection = struct {
 
         const json = std.fmt.bufPrint(
             self.response_buf,
-            "{{\"warmed\":{d},\"already_warm\":{d},\"total\":{d}}}",
-            .{ warmed, already, list.windows.len },
+            "{{\"warmed\":{d},\"already_warm\":{d},\"skipped\":{d},\"total\":{d}}}",
+            .{ warmed, already, skipped, list.windows.len },
         ) catch return sendError(request, .internal_server_error, "format error");
         sendJson(request, json, .ok);
         return .ok;

@@ -100,7 +100,7 @@ pub const WindowList = struct {
 };
 
 const EnumContext = struct {
-    list: std.ArrayList(WindowInfo),
+    list: *std.ArrayList(WindowInfo),
     arena: *std.heap.ArenaAllocator,
 };
 
@@ -139,7 +139,7 @@ fn enumCallback(hwnd: HWND, lparam: LPARAM) callconv(.winapi) BOOL {
         }
     }
 
-    ctx.list.append(.{
+    ctx.list.append(ctx.arena.allocator(), .{
         .hwnd = @intFromPtr(hwnd),
         .title = title,
         .process = process_name,
@@ -152,8 +152,9 @@ pub fn listWindows(allocator: std.mem.Allocator) !WindowList {
     var arena = std.heap.ArenaAllocator.init(allocator);
     errdefer arena.deinit();
 
+    var list = std.ArrayList(WindowInfo).initCapacity(arena.allocator(), 32) catch return error.OutOfMemory;
     var ctx = EnumContext{
-        .list = std.ArrayList(WindowInfo).init(arena.allocator()),
+        .list = &list,
         .arena = &arena,
     };
 
@@ -163,7 +164,7 @@ pub fn listWindows(allocator: std.mem.Allocator) !WindowList {
     const fg_hwnd: usize = if (fg) |h| @intFromPtr(h) else 0;
 
     return .{
-        .windows = try ctx.list.toOwnedSlice(),
+        .windows = try ctx.list.toOwnedSlice(arena.allocator()),
         .foreground_hwnd = fg_hwnd,
         .arena = arena,
     };

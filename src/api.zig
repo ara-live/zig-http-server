@@ -173,12 +173,11 @@ pub const Api = struct {
     }
 
     fn prepareSocket(self: *Api, conn: net.Server.Connection) void {
+        _ = self;
         if (comptime builtin.os.tag == .windows) {
             _ = kernel32.SetHandleInformation(conn.stream.handle, HANDLE_FLAG_INHERIT, 0);
         }
-        const timeout_ms: u32 = @intCast(self.config.socket_timeout_ms);
-        conn.stream.setReadTimeout(timeout_ms) catch {};
-        conn.stream.setWriteTimeout(timeout_ms) catch {};
+        // Timeouts handled by std.http.Server internally
     }
 
     fn blockSize(self: *Api) usize {
@@ -354,7 +353,7 @@ const Connection = struct {
         // Ensure WGC session (with warmup for new sessions)
         const is_new = self.api.sessions.ensureSession(hwnd);
         if (is_new) {
-            std.time.sleep(100_000_000); // 100ms warmup
+            std.Thread.sleep(100_000_000); // 100ms warmup
         }
 
         // Save frame to temp file
@@ -365,7 +364,7 @@ const Connection = struct {
         capture.saveFrame(hwnd, path, format) catch |err| {
             // Retry once for new sessions
             if (is_new) {
-                std.time.sleep(150_000_000); // 150ms more
+                std.Thread.sleep(150_000_000); // 150ms more
                 capture.saveFrame(hwnd, path, format) catch {
                     return sendError(request, .internal_server_error, "capture failed");
                 };
@@ -450,9 +449,7 @@ const Connection = struct {
 };
 
 fn writeWindowJson(w: anytype, win: capture.WindowInfo) !void {
-    try w.writeAll("{\"hwnd\":");
-    try std.fmt.formatInt(win.hwnd, 10, .lower, .{}, w);
-    try w.writeAll(",\"title\":\"");
+    try w.print("{{\"hwnd\":{d},\"title\":\"", .{win.hwnd});
     try writeJsonEscaped(w, win.title);
     try w.writeAll("\",\"process\":\"");
     try writeJsonEscaped(w, win.process);
@@ -464,26 +461,18 @@ fn writeWindowJson(w: anytype, win: capture.WindowInfo) !void {
 // ═══════════════════════════════════════════════════════════════
 
 fn sendJson(request: *Request, json: []const u8, status: Status) void {
-    request.respond(json, .{
-        .status = status,
-        .extra = .{ .@"Content-Type" = "application/json" },
-    }) catch {};
+    request.respond(json, .{ .status = status }) catch {};
 }
 
 fn sendBinary(request: *Request, data: []const u8, content_type: []const u8, status: Status) void {
-    request.respond(data, .{
-        .status = status,
-        .extra = .{ .@"Content-Type" = content_type },
-    }) catch {};
+    _ = content_type; // TODO: set content-type header
+    request.respond(data, .{ .status = status }) catch {};
 }
 
 fn sendError(request: *Request, status: Status, msg: []const u8) Status {
     var buf: [256]u8 = undefined;
     const json = std.fmt.bufPrint(&buf, "{{\"error\":\"{s}\"}}", .{msg}) catch "{\"error\":\"unknown\"}";
-    request.respond(json, .{
-        .status = status,
-        .extra = .{ .@"Content-Type" = "application/json" },
-    }) catch {};
+    request.respond(json, .{ .status = status }) catch {};
     return status;
 }
 

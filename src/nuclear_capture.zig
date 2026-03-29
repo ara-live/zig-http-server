@@ -227,14 +227,26 @@ pub const Pipeline = struct {
     pub fn capture(self: *Pipeline, hwnd: usize) ![]u8 {
         const session = try self.getSession(hwnd);
         
-        // Try to get a frame (WGC delivers asynchronously)
+        // Drain all available frames and use the last one
+        // This mirrors the DLL's "GetLatestFrame" behavior
+        var last_frame: ?*wgc.IDirect3D11CaptureFrame = null;
+        
+        // Give WGC a moment to deliver frames if pool is empty
         var attempts: u32 = 0;
-        while (attempts < 10) : (attempts += 1) {
-            if (session.pool.tryGetNextFrame()) |frame| {
-                defer _ = frame.release();
-                return self.processFrame(session, frame);
+        while (attempts < 20) : (attempts += 1) {
+            // Drain all available frames, keeping only the last
+            while (session.pool.tryGetNextFrame()) |frame| {
+                if (last_frame) |prev| _ = prev.release();
+                last_frame = frame;
             }
+            
+            if (last_frame != null) break;
             std.Thread.sleep(5 * std.time.ns_per_ms);
+        }
+        
+        if (last_frame) |frame| {
+            defer _ = frame.release();
+            return self.processFrame(session, frame);
         }
         
         return error.NoFrameAvailable;
@@ -250,10 +262,9 @@ pub const Pipeline = struct {
         }
         self.device.copyTexture(session.shared_texture, wgc_texture);
         
-        // Map for CUDA
-        var resource = session.cuda_resource;
-        try self.cuda_ctx.mapResource(&resource);
-        defer self.cuda_ctx.unmapResource(&resource);
+        // Map for CUDA (pass pointer to session's resource, not a copy)
+        try self.cuda_ctx.mapResource(&session.cuda_resource);
+        defer self.cuda_ctx.unmapResource(&session.cuda_resource);
         
         const cuda_array = try self.cuda_ctx.getMappedArray(session.cuda_resource);
         

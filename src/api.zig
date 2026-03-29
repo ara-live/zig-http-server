@@ -26,7 +26,7 @@ const response_buf_size: usize = 524_288; // 512KB for image data
 //  Session Management (WGC warmup)
 // ═══════════════════════════════════════════════════════════════
 
-const MAX_SESSIONS = 8;
+const MAX_SESSIONS = 64;
 
 const SessionManager = struct {
     sessions: [MAX_SESSIONS]usize = [_]usize{0} ** MAX_SESSIONS,
@@ -45,6 +45,26 @@ const SessionManager = struct {
             .tmp_dir = "tmp",
             .allocator = allocator,
         };
+    }
+
+    const WarmResult = enum { warmed, already, failed };
+
+    fn ensureSessionSafe(self: *SessionManager, hwnd: usize) WarmResult {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.sessions[0..self.count]) |s| {
+            if (s == hwnd) return .already;
+        }
+
+        capture.startCapture(hwnd) catch return .failed;
+
+        if (self.count < MAX_SESSIONS) {
+            self.sessions[self.count] = hwnd;
+            self.timestamps[self.count] = std.time.timestamp();
+            self.count += 1;
+        }
+        return .warmed;
     }
 
     fn ensureSession(self: *SessionManager, hwnd: usize) bool {
@@ -324,6 +344,7 @@ const Connection = struct {
 
         if (mem.eql(u8, path, "/capture") and method == .GET) return self.handleCapture(request, query);
         if (mem.eql(u8, path, "/windows") and method == .GET) return self.handleWindows(request);
+        if (mem.eql(u8, path, "/warmall") and method == .POST) return self.handleWarmAll(request);
         if (mem.eql(u8, path, "/status") and method == .GET) return self.handleStatus(request);
         if (mem.eql(u8, path, "/health") and method == .GET) return self.handleStatus(request);
 
@@ -441,6 +462,36 @@ const Connection = struct {
         w.writeAll("]}") catch return sendError(request, .internal_server_error, "json error");
 
         sendJson(request, stream.getWritten(), .ok);
+        return .ok;
+    }
+
+    fn handleWarmAll(self: *Connection, request: *Request) Status {
+        var list = capture.listWindows(self.api.allocator) catch {
+            return sendError(request, .internal_server_error, "failed to enumerate windows");
+        };
+        defer list.deinit();
+
+        var warmed: u32 = 0;
+        var already: u32 = 0;
+        var failed: u32 = 0;
+        for (list.windows) |win| {
+            const result = self.api.sessions.ensureSessionSafe(win.hwnd);
+            if (result == .warmed) {
+                warmed += 1;
+                std.Thread.sleep(5_000_000); // 5ms between session creations
+            } else if (result == .already) {
+                already += 1;
+            } else {
+                failed += 1;
+            }
+        }
+
+        const json = std.fmt.bufPrint(
+            self.response_buf,
+            "{{\"warmed\":{d},\"already_warm\":{d},\"total\":{d}}}",
+            .{ warmed, already, list.windows.len },
+        ) catch return sendError(request, .internal_server_error, "format error");
+        sendJson(request, json, .ok);
         return .ok;
     }
 

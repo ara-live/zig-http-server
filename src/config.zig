@@ -3,7 +3,7 @@ const std = @import("std");
 
 pub const Config = struct {
     host: []const u8 = "0.0.0.0",
-    port: u16 = 7070,
+    port: u16 = 7071,  // 7070 is v1 Python, 7071 is v2 Zig
     dll_path: []const u8 = "ScreenMaster.dll",
     max_body_size: usize = 65536,
     socket_timeout_ms: u32 = 30000,
